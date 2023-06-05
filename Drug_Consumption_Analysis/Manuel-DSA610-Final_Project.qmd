@@ -1,0 +1,680 @@
+---
+title: "Drug Consumption Analysis"
+date: 5/13/2023
+author: "Raphael Manuel"
+format:
+  html:
+    page-layout: full
+    embed-resources: true
+highlight-style: "adaptive"
+---
+
+
+```{python}
+#|code-fold: false
+#| echo: false
+
+import warnings
+warnings.filterwarnings("ignore")
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+%matplotlib inline
+import seaborn as sns
+import plotly.express as px
+import plotly.graph_objects as go
+import plotly.offline as pyo
+from sklearn.preprocessing import StandardScaler
+from sklearn.model_selection import cross_val_score, cross_val_predict
+from sklearn.metrics import accuracy_score, confusion_matrix, silhouette_score
+from sklearn.tree import DecisionTreeClassifier
+from sklearn.ensemble import RandomForestClassifier
+from sklearn import metrics
+from sklearn.cluster import KMeans
+from yellowbrick.cluster import KElbowVisualizer, SilhouetteVisualizer
+from kmeans_feature_imp import KMeansInterp
+
+drug= pd.read_csv('https://raw.githubusercontent.com/Manuels919/Data-Science-Projects/main/Drug_Consumption_Analysis/drug_consumption.csv', index_col=0)
+```
+
+## Abstract
+
+A person's enviroment is considered one of the most influential factors when developing an addiction to drugs or alcohol[^1]. But people who live in the same enviroment can become drug or alcohol users while others do not. This creates a new question; What indidividual factors can cause a person to use drugs or alcohol? In general, personality traits, which vary per person, are associated with drug use. Therefore, an individual can have a psychological predisposition to drug or alcohol use[^1]. 
+
+As a result, mental illness and drug abuse tend to go hand-in-hand. According to the Substance Abuse and Mental Health Services Administration, nearly 1 in 3 adults had either a substance use disorder or any mental illness in the past year, and 46 percent of young adults 18-25 had either a substance use disorder or any mental illness[^2].
+
+Medical professionals take on the bulk of the responsibility of administering treatment to individuals, as well as dealing with understaffing, worker burnout, high turnover rates, diminishing patient time, etc. Now coupled with the fact that there is nearly a 33% chance that your patient may abuse drugs and alcohol or have a mental illness, their jobs become exponentially more difficult. And has only been exacerbated by the fallout of the opioid epidemic; further skewing the balance between treating pain and driving drug abuse. 
+
+The goal is to analyze the data and create a model with the results of several psychological batteries, a comprehensive drug use history, and demographic data that can be used to assist in the determination of the chance that the person will abuse prescription medications. This analysis alone can not be used to conclude whether a perosn will abuse drugs but it can be used as a step towards assessing a patients risk.
+
+[^1]: Cited From: https://www.fortbehavioral.com/addiction-recovery-blog/personality-traits-related-to-drug-use/#:~:text=Drug%20Use%20and%20Personality,the%20drugs%20that%20are%20used.
+[^2]: Cited From: https://www.samhsa.gov/newsroom/press-announcements/20230104/samhsa-announces-nsduh-results-detailing-mental-illness-substance-use-levels-2021
+
+## About the Data
+
+## Cleaning/Preprocessing the Data
+
+There was not much to clean, the data was basically ready for analysis. I relabled columns names and changed the CL0-CL6 values to 0-6 scale.
+
+```{python}
+#|code-fold: true
+#The term "Legal drugs" can be misleading in this context since the dataset is supposed to already contain "legal" and "illegal" drugs. Upon further
+#I established that legal drugs are considered to be items that you can obtain legally that produce similar effects to illegal pyschoactives
+drug.rename(columns={"Legal drugs": "Legal Psychoactives"}, inplace=True)
+
+drug.columns = drug.columns.str.replace(' ', '_')
+
+#Dataset has classes as CL[0-6] replace for easier manipulation
+drug.replace({'CL0': 0,'CL1': 1,'CL2': 2,'CL3': 3,'CL4': 4,'CL5': 5,'CL6': 6}, regex=True, inplace=True)
+
+```
+
+### Removing Semer
+
+Semeron is a ficticious drug that was used as a way to identify over-claimers. We can easily remove these records because it is likely they lied about other aspects of their drug history. Fortunately after dropping only about 8 records were lost.
+
+```{python}
+#|code-fold: true
+
+#Select all of the people who entered "0" or never used for Semer
+drug = drug.loc[(drug['Semer'] == 0)].reset_index(drop=True)
+
+drug.drop('Semer', inplace=True, axis=1)
+
+#Copy dataset for the machine learning
+df = drug.copy()
+```
+
+## Exploring the Data
+
+```{python}
+#|code-fold: true
+drug.head()
+```
+
+### Average Use for Each Drug
+
+As expected Caffeine, Alcohol, and Chocolate, have the highest average use among the respondents. On average the respondents have used chocolate and caffeine in the last week. Surprisingly, Nicotine and Cannabis on average have been used in the Last Year. At the time this data was collected, 2016, marijuana was not legal which might explain the lack of use.
+
+
+```{python}
+#|code-fold: true
+
+df_averages = pd.merge(pd.DataFrame(drug.iloc[:,12:].agg("mean", axis="rows"), columns=['avg']),
+                         pd.DataFrame(drug.iloc[:,12:].sem(axis='rows'), columns=['se']),
+                         left_index=True, right_index=True)
+
+df_averages = df_averages.assign(low=lambda x: x['avg'] - x['se'],
+            high = lambda x: x['avg'] + x['se'])
+
+df_averages.sort_values('avg', inplace=True)
+
+fig = px.scatter(df_averages,
+                 x='avg',
+                 y=df_averages.index,
+                 error_x='se',
+                color_discrete_sequence=px.colors.sequential.RdBu)
+
+fig.update_layout(
+    title="Drug Use Distribution",
+    autosize=False,
+    width=650,
+    height=500,
+    title_x=0.5
+)
+
+fig.update_yaxes(title_text="Drug")
+fig.update_xaxes(title_text="Average Drug Use")
+fig.show()
+
+```
+
+
+### How does Demographic Information Correlate with the Rest of the Data?
+
+Age, Gender, Education, Country, and Ethnicity have very little to no correlation with the rest of the data. There is some correlation between age and country however that can be explained through the bias that was addressed earlier. 
+
+```{python}
+#|code-fold: true
+#| label: "Demographic Infomration Correlation"
+#| fig-cap: "A Correlation Matrix of Demographic Information against the other Features"
+
+corr_mat=drug.corr(method='pearson').round(2)
+plt.figure(figsize=(20,10))
+sns.heatmap(corr_mat[:5],vmax=1,square=True,annot=True,cmap='rocket');
+
+```
+### How do the Pyschological Scores Correlate with Drug Use?
+
+As expected the drug uses are moderately correlated. Noteably, cocaine and ecstacy, which have a .61 correlation. Cocaine is a nervous system stimulant, and Ecstacy mimics the effects of both halucinogens and stimulants[^3]. Both are often used in club and party settings.
+
+[^3]: Cited From: https://www.mentalhelp.net/substance-abuse/cocaine/mixing-with-ecstasy/
+
+```{python}
+#|code-fold: true
+#| label: "Pyschological Scores and Drug Use Correlation"
+#| fig-cap: "A Correlation Matrix of the Pyschological Scorea against Drug Use"
+
+corr_mat=drug.corr(method='pearson').round(2)
+plt.figure(figsize=(20,15))
+sns.heatmap(corr_mat.iloc[5:, 5:],vmax=1,square=True,annot=True,cmap='rocket');
+
+```
+
+### Country and Ethnicity Distribution
+
+Data was collected primarily from the five core countries of the anglosphere. With about 55.6% being from the UK and 29.4% from the US.
+
+```{python}
+#|code-fold: true
+
+Country = drug['Country'].value_counts()
+
+names = ["UK", "USA", "Other", "Canada", "Australia", "Republic of Ireland", "New Zealand"]
+fig = px.pie(values=Country.values,
+             names=names,
+             color_discrete_sequence=px.colors.sequential.RdBu,
+             )
+
+fig.update_layout(
+    title="Country Distribution",
+    autosize=False,
+    width=650,
+    height=500)
+
+fig.show()
+
+```
+
+Over 90% of the respondents were white. If we were to train the model without addressing this clear bias it would harm the underrepresented populations.
+According to the 2021 census over 81% of the UK was white and over 75% of the US was white[^4]. Considering how the majority of the responses were from the US and UK it would explain the extreme bias.
+
+[^4]: Cited From: https://www.census.gov/quickfacts/fact/table/US/PST045221
+
+```{python}
+#|code-fold: true
+
+Ethnicity = drug['Ethnicity'].value_counts()
+
+names = ["White", "Other", "Black", "Asian", "Mixed-White/Asian", "Mixed-White/Black", "Mixed-Black/Asian"]
+fig = px.pie(values=Ethnicity.values,
+             names=names,
+             color_discrete_sequence=px.colors.sequential.RdBu
+            )
+
+fig.update_layout(
+    title="Ethinicty Distribution",
+    autosize=False,
+    width=650,
+    height=500,
+    margin=dict(t=150, b=0, l=0, r=0))
+
+fig.show()
+```
+### Age Distribution
+
+
+```{python}
+#|code-fold: true
+
+temp = drug.copy()
+
+Age = {-0.95197:"18-24", -0.07854:"25-34", 0.49788:"35-44", 1.09449:"45-54", 1.82213:"55-64", 2.59171:"65+"}
+temp.replace(Age, inplace=True)
+
+fig = px.histogram(temp, x='Age',
+             color_discrete_sequence=px.colors.sequential.RdBu,
+             )
+
+fig.update_layout(
+    title="Age Distribution",
+    autosize=False,
+    width=650,
+    height=500,
+    xaxis={'categoryorder':'total descending'},
+    title_x=0.5
+)
+
+
+fig.show()
+
+```
+
+## Machine Learning
+
+### K-Means
+
+The data is unsupervised, thus there are no labels or target variable. Before we use the Random Forest Classifier we use K-Means to cluster the data then we create our own labels based on the top features used to create the clusters.
+
+#### Scaling the Data
+
+When implementing distance based clustering algorithms such as K-Means and KNN, it is reccommended that the data is scaled.
+```{python}
+#|code-fold: true
+
+# Create a scaler object
+df.drop(['Age', 'Gender', 'Education', 'Country', 'Ethnicity'], axis=1, inplace=True)
+#
+scaler = StandardScaler()
+scaler.fit(df)
+
+# Scale the dataframe
+scaled_df = pd.DataFrame(scaler.transform(df), columns=df.columns)
+
+```
+#### Determining the Optimal K
+
+One of the downsides of K means is that you have to manually calcualte the number of clusters, K. There are two methods: the elbow method, and calculating the silhouette score.
+
+The Elbow Method finds the WCSS (Within-Cluster Sum of Square) or the sum of the square distance between points in a cluster and the cluster centroid. When you graph these values for a range of K, where the elbow is formed is the optimal K for the model.
+
+The Silhouette Method  measures the distance of a data point is within cluster and compares this value the distance to other clusters. The method  is considered to be the more reliable of the two methods and is often used to confirm the findings of the elbow method.
+
+
+##### The Elbow Method
+
+One of the downsides of the elbow method is that in some cases tehre is no distinct "elbow". Using the yellowbrick library from scikit-learn, the graphic below the elbow determined to be K=3 to be the optimal number of clusters. However, it can be argued that the K=2 is where the elbow is actually formed.
+```{python}
+#|code-fold: true
+#| label: "Elbow Method"
+#| fig-cap: "Elbow Method using the YellowBrick Library"
+km = KMeans(random_state=0)
+visualizer = KElbowVisualizer(km, k=(1,10), size=(400,200))
+ 
+visualizer.fit(scaled_df)        # Fit the data to the visualizer
+visualizer.show();     # Finalize and render the figure
+
+```
+
+##### The Silhoutte Method
+
+When analyzing a silhouette plot there are two conditions that would satisfy the optimal k:
+
+1) All of the clusters should have a silhouette score above the average which is indicated by the red line.
+2) The size of the clusters should be relative similar in size.
+
+The silhoutte method contradicts the original K=3 clusters calculated by the elbow method. At K=8 clusters both conditions are satisfied: the silhoutte score for each cluster is greater than the average and they are all relatively the same size.
+
+```{python}
+#|code-fold: true
+#| label: "Silhoutte Scores"
+#| fig-cap: "A Visual Representation of the Silhoutte Method using the YellowBrick Library"
+
+fig, ax = plt.subplots(4,2, figsize=(20,30))
+
+km2 = KMeans(n_clusters=2, init='k-means++', n_init=10, max_iter=100, random_state=0)
+km3 = KMeans(n_clusters=3, init='k-means++', n_init=10, max_iter=100, random_state=0)
+
+visualizer = SilhouetteVisualizer(km2, colors='yellowbrick', ax=ax[0,0])
+visualizer.fit(scaled_df) 
+
+visualizer = SilhouetteVisualizer(km3, colors='yellowbrick', ax=ax[0,1])
+visualizer.fit(scaled_df) 
+
+km4 = KMeans(n_clusters=4, init='k-means++', n_init=10, max_iter=100, random_state=0)
+km5 = KMeans(n_clusters=5, init='k-means++', n_init=10, max_iter=100, random_state=0)
+
+visualizer = SilhouetteVisualizer(km4, colors='yellowbrick', ax=ax[1,0])
+visualizer.fit(scaled_df) 
+
+visualizer = SilhouetteVisualizer(km5, colors='yellowbrick', ax=ax[1,1])
+visualizer.fit(scaled_df) 
+
+km6 = KMeans(n_clusters=6, init='k-means++', n_init=10, max_iter=100, random_state=0)
+km7 = KMeans(n_clusters=7, init='k-means++', n_init=10, max_iter=100, random_state=0)
+
+visualizer = SilhouetteVisualizer(km6, colors='yellowbrick', ax=ax[2,0])
+visualizer.fit(scaled_df) 
+
+visualizer = SilhouetteVisualizer(km7, colors='yellowbrick', ax=ax[2,1])
+visualizer.fit(scaled_df) 
+
+km8 = KMeans(n_clusters=8, init='k-means++', n_init=10, max_iter=100, random_state=0)
+
+visualizer = SilhouetteVisualizer(km8, colors='yellowbrick', ax=ax[3,0])
+visualizer.fit(scaled_df)
+
+ax[3,1].axis('off')
+plt.subplots_adjust(bottom=0.04, left=0.1)
+
+fig.supxlabel('Silhouette Coefficient Values', fontsize=20)
+fig.supylabel('Number of Clusters', fontsize=20)
+
+plt.show();
+```
+
+#### Fitting the K-Means Model
+
+I will be using a K-Means wrapper function; kmeans-feature-importance. It adds the "feature_importance" property that displays the top weighted feautures based on a cluster-based feature weighting technique such as "wcss_min".
+
+```{python}
+#|code-fold: true
+
+scaled_df8 = scaled_df.copy()
+#
+kmeansModel8 = KMeansInterp(
+               n_clusters=8,
+               ordered_feature_names=scaled_df8.columns.tolist(), 
+               feature_importance_method='wcss_min',
+               random_state = 0
+              ).fit(scaled_df8)
+```
+
+After fitting the model using the scaled dataframe we are now able to use the property "feature_importance" to manually analyze the top weighted feautures in each cluster and name them accordingly. 
+
+```{python}
+#|code-fold: true
+
+
+print('Cluster #1                                             Cluster #2                                             Cluster #3')
+print("The Top 10 Features:                                   The Top 10 Features:                                   The Top 10 Features:")
+[print(f'{str(a):<55}' + f'{str(b):<55}' + f'{str(c)}') for a, b, c in zip(kmeansModel8.feature_importances_[0][:10], kmeansModel8.feature_importances_[1][:10], kmeansModel8.feature_importances_[2][:10])]
+print("--------------------------------------------------------------------------------------------------------------------------------------------------")
+
+print('Cluster #4                                   Cluster #5                                             Cluster #6')
+print("The Top 10 Features:                         The Top 10 Features:                                   The Top 10 Features:")
+[print(f'{str(a):<45}' + f'{str(b):<55}' + f'{str(c)}') for a, b, c in zip(kmeansModel8.feature_importances_[3][:10], kmeansModel8.feature_importances_[4][:10], kmeansModel8.feature_importances_[5][:10])]
+print("--------------------------------------------------------------------------------------------------------------------------------------------------")
+
+print('Cluster #7                                             Cluster #8')
+print("The Top 10 Features:                                   The Top 10 Features:")
+[print(f'{str(a):<55}' + f'{str(b):<55}') for a, b in zip(kmeansModel8.feature_importances_[6][:10], kmeansModel8.feature_importances_[7][:10])];
+print("--------------------------------------------------------------------------------------------------------------------------------------------------")
+```
+
+#### Naming the Clusters
+
+#
+#
+```{python}
+#|code-fold: true
+#|echo: false
+#Create dictionary of each cluster and the top ten weighted features
+clust_dict= {k: sorted(v, key=lambda x: x[1], reverse=True)[:10] for k, v in kmeansModel8.feature_importances_.items()}
+
+```
+
+##### Cluster 1: Extraverted Depressed Addicts (EDA)
+
+The EDA primarily contains psychological batteries. The conscientiousness, extraversion, and neuroticism all indicate this group is highly driven, detail-oriented, and engaged in society. The first drug in the group is benzodiazepines[^5], which are prescribed for those who are overwhelmed and suffer from high anxiety. The second drug is Methamphetamines[^6], a high addictive stimulant, that can be prescribed to treat obesity and ADHD.
+
+[^5]: Cited From: https://www.mind.org.uk/information-support/drugs-and-treatments/sleeping-pills-and-minor-tranquillisers/about-benzodiazepines/#:~:text=Benzodiazepines%20may%20be%20prescribed%20to,be%20the%20most%20effective%20treatment.
+
+[^6]: Cited From: https://www.dea.gov/factsheets/methamphetamine
+
+```{python}
+#|code-fold: true
+
+df0= pd.DataFrame(clust_dict[0])
+fig=px.bar(df0, x=0, y=1, color=0,color_discrete_sequence=px.colors.sequential.RdBu)
+  
+fig.update_layout(
+      yaxis= dict(
+          title= 'Feature Weight',
+          tickfont=dict(size=16, color='black', family='Arial, sans-serif'),
+          title_font=dict(size=20, family='Arial, sans-serif', color='black')),
+      xaxis= dict(
+          title= 'Feature',
+          tickfont=dict(size=16, color='black', family='Arial, sans-serif'),
+          title_font=dict(size=20, family='Arial, sans-serif', color='black')),
+      
+      title= ''
+      #title= titles[key] #to title graphs
+              )
+fig.update_traces(showlegend=False)
+
+fig.show()
+```
+
+##### Cluster 2: College Dorm Dudes. (CDD)
+
+The CDD has  indicators of strong cannabis use, as well as other drugs prevalent in college environments, such as ecstasy, mushrooms, and amphetamines. They are sensation-seeking, impulsive, and have a tendency to use hallucinogens possibly indicating a desire to be free from their academic responsibilities.
+
+
+```{python}
+#|code-fold: true
+
+df1= pd.DataFrame(clust_dict[1])
+fig=px.bar(df1, x=0, y=1, color=0,color_discrete_sequence=px.colors.sequential.RdBu)
+  
+fig.update_layout(
+      yaxis= dict(
+          title= 'Feature Weight',
+          tickfont=dict(size=16, color='black', family='Arial, sans-serif'),
+          title_font=dict(size=20, family='Arial, sans-serif', color='black')),
+      xaxis= dict(
+          title= 'Feature',
+          tickfont=dict(size=16, color='black', family='Arial, sans-serif'),
+          title_font=dict(size=20, family='Arial, sans-serif', color='black')),
+      
+      title= ''
+      #title= titles[key] #to title graphs
+              )
+fig.update_traces(showlegend=False)
+
+fig.show()
+
+```
+
+##### Cluster 3: Poly Substance Abusers. (PSA)
+
+The PSA group has a strong affinity to some of the most addictive and destructive drugs that carry the highest prison sentences in most countries for both possession and sale. These include heroin, crack, and meth. This group had no strong correlation to any psych profiles.
+
+
+```{python}
+#|code-fold: true
+
+df2= pd.DataFrame(clust_dict[2])
+fig=px.bar(df2, x=0, y=1, color=0,color_discrete_sequence=px.colors.sequential.RdBu)
+  
+fig.update_layout(
+      yaxis= dict(
+          title= 'Feature Weight',
+          tickfont=dict(size=16, color='black', family='Arial, sans-serif'),
+          title_font=dict(size=20, family='Arial, sans-serif', color='black')),
+      xaxis= dict(
+          title= 'Feature',
+          tickfont=dict(size=16, color='black', family='Arial, sans-serif'),
+          title_font=dict(size=20, family='Arial, sans-serif', color='black')),
+      
+      title= ''
+      #title= titles[key] #to title graphs
+              )
+fig.update_traces(showlegend=False)
+
+fig.show()
+
+```
+
+##### Cluster 4: Hallucinogenic Partying Users. (HPU)
+
+This group has a strong affinity to an illegal and hard to find hallucinogen; ketamine. They also have a predilection for other hallucinogens such as party drugs like ecstacy, cocaine, and poppers. This group also lacks any strong association with specific psychological profiles.
+
+```{python}
+#|code-fold: true
+
+df3= pd.DataFrame(clust_dict[3])
+fig=px.bar(df3, x=0, y=1, color=0, color_discrete_sequence=px.colors.sequential.RdBu)
+  
+fig.update_layout(
+      yaxis= dict(
+          title= 'Feature Weight',
+          tickfont=dict(size=16, color='black', family='Arial, sans-serif'),
+          title_font=dict(size=20, family='Arial, sans-serif', color='black')),
+      xaxis= dict(
+          title= 'Feature',
+          tickfont=dict(size=16, color='black', family='Arial, sans-serif'),
+          title_font=dict(size=20, family='Arial, sans-serif', color='black')),
+      
+      title= ''
+      #title= titles[key] #to title graphs
+              )
+fig.update_traces(showlegend=False)
+
+fig.show()
+```
+
+##### Cluster 5: Hypersexual Users (HSU)
+
+The HSU group clusters primarily with poppers, a depressant said to greatly increase erogenous sensitivity; also coupling as an aphrodisiac.  However, they also cluster with two of the more dangerous and addictive drugs recorded in the study, nicotine and meth. They are also cluster strongly with the neuroticism and extraversion batteries, indicating they are sensitive, energetic, emotional, and sociable.
+
+```{python}
+#|code-fold: true
+
+df4= pd.DataFrame(clust_dict[4])
+fig=px.bar(df4, x=0, y=1, color=0, color_discrete_sequence=px.colors.sequential.RdBu)
+  
+fig.update_layout(
+      yaxis= dict(
+          title= 'Feature Weight',
+          tickfont=dict(size=16, color='black', family='Arial, sans-serif'),
+          title_font=dict(size=20, family='Arial, sans-serif', color='black')),
+      xaxis= dict(
+          title= 'Feature',
+          tickfont=dict(size=16, color='black', family='Arial, sans-serif'),
+          title_font=dict(size=20, family='Arial, sans-serif', color='black')),
+      
+      title= ''
+      #title= titles[key] #to title graphs
+              )
+fig.update_traces(showlegend=False)
+
+fig.show()
+```
+
+##### Cluster 6: Just a Regular Joe. (JRJ)
+
+The JRJ group seems to correlate to what most of Western society would deem acceptable. Strong preferences for legal drugs dominated by caffeine, but with some use of nicotine and alcohol. Sensation-seeking and impulsivity rank high as well. This may indicate that they gravitate towards legal drugs for the constant, low-risk dopamine hits.
+
+```{python}
+#|code-fold: true
+
+df5= pd.DataFrame(clust_dict[5])
+fig=px.bar(df5, x=0, y=1, color=0, color_discrete_sequence=px.colors.sequential.RdBu)
+  
+fig.update_layout(
+      yaxis= dict(
+          title= 'Feature Weight',
+          tickfont=dict(size=16, color='black', family='Arial, sans-serif'),
+          title_font=dict(size=20, family='Arial, sans-serif', color='black')),
+      xaxis= dict(
+          title= 'Feature',
+          tickfont=dict(size=16, color='black', family='Arial, sans-serif'),
+          title_font=dict(size=20, family='Arial, sans-serif', color='black')),
+      
+      title= ''
+      #title= titles[key] #to title graphs
+              )
+fig.update_traces(showlegend=False)
+
+fig.show()
+```
+
+##### Cluster 7: Hippies and Ravers. (HAR)
+
+The HAR group gravitate strongly towards hallucinogens and ecstasy. They strongly cluster to openness to experience, which is often something cited as being necessary to engage in positive use of hallucinogens. They are sensation-seeking, extraverted, and neurotic, which may lend itself to the anecdotal observation of heavy hallucinogen users being highly philosophical, proselytizing, and ritual-oriented.
+
+
+```{python}
+#|code-fold: true
+
+df6= pd.DataFrame(clust_dict[6])
+fig=px.bar(df6, x=0, y=1, color=0, color_discrete_sequence=px.colors.sequential.RdBu)
+  
+fig.update_layout(
+      yaxis= dict(
+          title= 'Feature Weight',
+          tickfont=dict(size=16, color='black', family='Arial, sans-serif'),
+          title_font=dict(size=20, family='Arial, sans-serif', color='black')),
+      xaxis= dict(
+          title= 'Feature',
+          tickfont=dict(size=16, color='black', family='Arial, sans-serif'),
+          title_font=dict(size=20, family='Arial, sans-serif', color='black')),
+      
+      title= ''
+      #title= titles[key] #to title graphs
+              )
+fig.update_traces(showlegend=False)
+
+fig.show()
+```
+
+##### Cluster 8: Smokers and Shroomers. (SAS)
+
+The SAS strongly group with smokable drugs, ecstasy, and easier to access psychoactives. Their cluster also includes conscientiousness and neuroticism, both indicating organization, detail-orientation and goal driven. These are the people who party like crazy on Friday, Saturday, and Sunday, and show up ready to go for work on Monday.
+
+
+```{python}
+#|code-fold: true
+
+df7= pd.DataFrame(clust_dict[7])
+fig=px.bar(df7, x=0, y=1, color=0, color_discrete_sequence=px.colors.sequential.RdBu)
+  
+fig.update_layout(
+      yaxis= dict(
+          title= 'Feature Weight',
+          tickfont=dict(size=16, color='black', family='Arial, sans-serif'),
+          title_font=dict(size=20, family='Arial, sans-serif', color='black')),
+      xaxis= dict(
+          title= 'Feature',
+          tickfont=dict(size=16, color='black', family='Arial, sans-serif'),
+          title_font=dict(size=20, family='Arial, sans-serif', color='black')),
+      
+      title= ''
+      #title= titles[key] #to title graphs
+              )
+fig.update_traces(showlegend=False)
+
+fig.show()
+```
+
+
+#### Random Forest Classifier
+
+After identifying the clusters, we can now use a supervised learning model, Random Forest Classifier. I trained a Random Forest Classification model using five cross-fold validation. The model had a pretty good accuracy score of about 84.2% Though it had trouble classifying EDA and LDU which it classified correctly 73% and 77% of the time respectively.
+
+```{python}
+#|code-fold: true
+
+rf_model = RandomForestClassifier(n_estimators=100, random_state=0) #instantiate random forest classifier model
+clusters = kmeansModel8.labels_
+
+cross_val_score(rf_model, scaled_df8, clusters, cv=5).mean()
+
+# Get and reshape confusion matrix data
+pred = cross_val_predict(rf_model, scaled_df8, clusters, cv=5)
+matrix = confusion_matrix(clusters, pred)
+matrix = matrix.astype('float') / matrix.sum(axis=1)[:, np.newaxis]
+
+# Build the plot
+fig, ax = plt.subplots(1,1, figsize=(8,5))
+# plt.figure(figsize=(10,7))
+sns.set(font_scale=1.4)
+sns.heatmap(matrix, annot=True, annot_kws={'size':10},
+            cmap="rocket_r", linewidths=0.2)
+
+# Add labels to the plot
+class_names = ['EDA', 'CDD', 'PSA', 
+               'HPU', 'HSU', 'JRJ',    
+               'HAR', 'SAS']
+               
+tick_marks = np.arange(len(class_names))
+tick_marks2 = tick_marks + 0.5
+plt.xticks(tick_marks + 0.2, class_names, ha="left")
+plt.yticks(tick_marks2, class_names, rotation=0)
+plt.xlabel('Predicted label')
+plt.ylabel('True label')
+plt.title('Confusion Matrix for Random Forest Model')
+plt.rcParams['axes.labelpad'] = 30
+
+plt.show()
+```
+
+## Conclusions
+
+1) The unsupervised data from this psychological battery and substance use data forms well into 8 clusters that focus mainly on drug use vs. the psychological batteries.
+
+2) The data provides a great starting point for developing a data-driven tool to assist healthcare professionals, and perhaps someday administrators, in driving prescription choices and risk.
+
+3) This dataset further illustrates the need for outreach to more diverse communities/nations. Specifically collecting more data  from minority communities.
+
